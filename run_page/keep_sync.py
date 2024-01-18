@@ -21,6 +21,8 @@ import xml.etree.ElementTree as ET
 LOGIN_API = "https://api.gotokeep.com/v1.1/users/login"
 RUN_DATA_API = "https://api.gotokeep.com/pd/v3/stats/detail?dateUnit=all&type=running&lastDate={last_date}"
 RUN_LOG_API = "https://api.gotokeep.com/pd/v3/runninglog/{run_id}"
+HIKING_DATA_API = "https://api.gotokeep.com/pd/v3/stats/detail?dateUnit=all&type=hiking&lastDate={last_date}"
+HIKING_LOG_API = "https://api.gotokeep.com/pd/v3/hikinglog/{run_id}"
 
 HR_FRAME_THRESHOLD_IN_DECISECOND = 100  # Maximum time difference to consider a data point as the nearest, the unit is decisecond(分秒)
 
@@ -41,6 +43,31 @@ def login(session, mobile, password):
         token = r.json()["data"]["token"]
         headers["Authorization"] = f"Bearer {token}"
         return session, headers
+
+def get_to_download_hiking_ids(session, headers):
+    last_date = 0
+    result = []
+    while 1:
+        r = session.get(HIKING_DATA_API.format(last_date=last_date), headers=headers)
+        if r.ok:
+            run_logs = r.json()["data"]["records"]
+
+            for i in run_logs:
+                logs = [j["stats"] for j in i["logs"]]
+                result.extend(k["id"] for k in logs if not k["isDoubtful"])
+            last_date = r.json()["data"]["lastTimestamp"]
+            since_time = datetime.utcfromtimestamp(last_date / 1000)
+            print(f"pares keep ids data since {since_time}")
+            time.sleep(1)  # spider rule
+            if not last_date:
+                break
+    return result
+
+
+def get_single_hiking_data(session, headers, run_id):
+    r = session.get(HIKING_LOG_API.format(run_id=run_id), headers=headers)
+    if r.ok:
+        return r.json()
 
 
 def get_to_download_runs_ids(session, headers):
@@ -186,6 +213,30 @@ def get_all_keep_tracks(email, password, old_tracks_ids, with_download_gpx=False
     return tracks
 
 
+def get_all_keep_tracks_hiking(email, password, old_tracks_ids, with_download_gpx=False):
+    if with_download_gpx and not os.path.exists(GPX_FOLDER):
+        os.mkdir(GPX_FOLDER)
+    s = requests.Session()
+    s, headers = login(s, email, password)
+    runs = get_to_download_hiking_ids(s, headers)
+    runs = [run for run in runs if run.split("_")[1] not in old_tracks_ids]
+    print(f"{len(runs)} new keep runs to generate")
+    tracks = []
+    old_gpx_ids = os.listdir(GPX_FOLDER)
+    old_gpx_ids = [i.split(".")[0] for i in old_gpx_ids if not i.startswith(".")]
+    for run in runs:
+        print(f"parsing keep id {run}")
+        try:
+            run_data = get_single_hiking_data(s, headers, run)
+            track = parse_raw_data_to_nametuple(
+                run_data, old_gpx_ids, s, with_download_gpx
+            )
+            tracks.append(track)
+        except Exception as e:
+            print(f"Something wrong paring keep id {run}" + str(e))
+    return tracks
+
+
 def parse_points_to_gpx(run_points_data, start_time):
     """
     Convert run points data to GPX format.
@@ -302,7 +353,8 @@ def run_keep_sync(email, password, with_download_gpx=False):
     generator = Generator(SQL_FILE)
     old_tracks_ids = generator.get_old_tracks_ids()
     new_tracks = get_all_keep_tracks(email, password, old_tracks_ids, with_download_gpx)
-    generator.sync_from_app(new_tracks)
+    new_tracks_hiking = get_all_keep_tracks_hiking(email, password, old_tracks_ids, with_download_gpx)
+    generator.sync_from_app(new_tracks+new_tracks_hiking)
 
     activities_list = generator.load()
     with open(JSON_FILE, "w") as f:
